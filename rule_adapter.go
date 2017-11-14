@@ -39,35 +39,15 @@ func main() {
 	app.Version(version.Print("promtool"))
 	app.HelpFlag.Short('h')
 
-	/*
-		checkCmd := app.Command("check", "Check the resources for validity.")
-
-		checkRulesCmd := checkCmd.Command("rules", "Check if the rule files are valid or not.")
-		ruleFiles := checkRulesCmd.Arg(
-			"rule-files",
-			"The rule files to check.",
-		).Required().ExistingFiles()
-
-		updateCmd := app.Command("update", "Update the resources to newer formats.")
-		updateRulesCmd := updateCmd.Command("rules", "Update rules from the 1.x to 2.x format.")
-		ruleFilesUp := updateRulesCmd.Arg("rule-files", "The rule files to update.").Required().ExistingFiles()
-	*/
-
 	updateCmd := app.Command("update", "Update the resources to newer formats.")
 	ruleFilePath := updateCmd.Arg("path", "rules file path").Required().ExistingDir()
+	redisPath := updateCmd.Arg("redis", "redis path ip:port").Required().TCP()
+	redisPassword := updateCmd.Arg("password", "redis path password").Required().String()
 
 	switch kingpin.MustParse(app.Parse(os.Args[1:])) {
-	/*
-		case checkRulesCmd.FullCommand():
-			os.Exit(CheckRules(*ruleFiles...))
-
-		case updateRulesCmd.FullCommand():
-			os.Exit(UpdateRules(*ruleFilesUp...))
-	*/
 
 	case updateCmd.FullCommand():
-		os.Exit(RefreshRules(*ruleFilePath))
-
+		os.Exit(RefreshRules(*ruleFilePath, (*redisPath).String(), *redisPassword))
 	}
 
 }
@@ -77,24 +57,25 @@ type judgeRecored struct {
 	Expr string `json:"expre"`
 }
 
-func RefreshRules(path string) int {
+func RefreshRules(path, redis, password string) int {
 
-	interval := time.Duration(60 * time.Second)
+	interval := time.Duration(5 * time.Second)
+	updateRules(path, redis, password)
 
 	for {
 		select {
 		case <-time.Tick(interval):
-			updateRules()
+			updateRules(path, redis, password)
 		}
 	}
 
 }
 
-func updateRules() int {
-
+func updateRules(path, redis, password string) int {
+	//TODO: filename with job or service name
 	filename := "test"
 
-	data, err := getRedisData()
+	data, err := getRedisData(redis, password)
 	if err != nil {
 		fmt.Println("get data from redis error: ", err)
 		return 1
@@ -107,7 +88,7 @@ func updateRules() int {
 	}
 
 	//check rules
-	rulenum, ruleGroups, errsLocal := checkLocalRules(filename + ".yml")
+	rulenum, ruleGroups, errsLocal := checkLocalRules(path + "/" + filename + ".yml")
 
 	//TODO: 文件不存在的时候该如何处理？
 	if errsLocal != nil {
@@ -147,11 +128,11 @@ func updateRules() int {
 
 }
 
-func getRedisData() ([]string, error) {
+func getRedisData(path, password string) ([]string, error) {
 	client := redis.NewClient(&redis.Options{
 		Network:  "tcp",
-		Addr:     "10.139.103.34:6001",
-		Password: "test",
+		Addr:     path,
+		Password: password,
 		DB:       2,
 	})
 	defer client.Close()
@@ -180,7 +161,6 @@ func getRemoteRules(data []string) (map[string]string, error) {
 }
 
 func convertToYaml(remoteRules map[string]string, filename string) ([]byte, []rulefmt.Rule, error) {
-	//try write file
 	yamlRG := &rulefmt.RuleGroups{
 		Groups: []rulefmt.RuleGroup{{
 			Name: filename,
@@ -193,7 +173,7 @@ func convertToYaml(remoteRules map[string]string, filename string) ([]byte, []ru
 		yamlRules = append(yamlRules, rulefmt.Rule{
 			Record: name,
 			Expr:   expr,
-			Labels: map[string]string{"testlable1": "testvalue1", "testlabel2": "testvalue2"},
+			//Labels: map[string]string{"testlable1": "testvalue1", "testlabel2": "testvalue2"},
 		})
 	}
 
