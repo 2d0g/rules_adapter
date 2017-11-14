@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"qim/common/utils"
 	"reflect"
 	"strings"
 	"time"
@@ -242,7 +241,7 @@ func updateRulesFile(data []byte, filename string) {
 }
 
 func reloadPromeConfig() {
-	client, err := utils.NewClientForTimeOut()
+	client, err := NewClientForTimeOut()
 	if err != nil {
 		fmt.Println(err)
 		return
