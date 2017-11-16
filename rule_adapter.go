@@ -17,20 +17,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"reflect"
-	"strings"
+	"strconv"
 	"time"
 
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 	redis "gopkg.in/redis.v4"
 	yaml "gopkg.in/yaml.v2"
 
+	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/version"
 	"github.com/tinytub/rules_adapter/pkg/rulefmt"
 )
@@ -55,7 +54,7 @@ func main() {
 type judgeRecored struct {
 	Name string `json:"alarm_name"`
 	Expr string `json:"expre"`
-	Step string `json:"step"`
+	Step int    `json:"step"`
 }
 
 func RefreshRules(path, redis, password string) int {
@@ -74,7 +73,7 @@ func RefreshRules(path, redis, password string) int {
 
 func updateRules(fpath, redis, password string) int {
 	//TODO: filename with job or service name
-	filename := "test"
+	filename := "wonder"
 	abpath := path.Join(fpath, filename+".yml")
 	absfpath, _ := filepath.Abs(abpath)
 
@@ -84,14 +83,14 @@ func updateRules(fpath, redis, password string) int {
 		return 1
 	}
 
-	remoteRulesMap, err := getRemoteRules(data)
+	remoteRuleGroups, err := getRemoteRules(data)
 	if err != nil {
 		fmt.Println("get Remote rules error: ", err)
 		return 1
 	}
 
 	//check rules
-	rulenum, ruleGroups, errsLocal := checkLocalRules(absfpath)
+	_, localRuleGroups, errsLocal := checkLocalRules(absfpath)
 
 	//TODO: 文件不存在的时候该如何处理？
 	if errsLocal != nil {
@@ -99,54 +98,16 @@ func updateRules(fpath, redis, password string) int {
 		return 1
 	}
 
-	localrules := make([]rulefmt.Rule, 0, rulenum)
-	for _, rg := range ruleGroups {
-		localrules = append(localrules, rg.Rules...)
-	}
+	updates := checkUpdate(*localRuleGroups, *remoteRuleGroups)
 
-	_, remoteRules, err := convertToYaml(remoteRulesMap, filename)
-	/*
-		errsRemote := checkRulesValid(remoteRules)
+	if updates > 0 {
 
-		if errsRemote != nil {
-			fmt.Println("remote rules err: ", errsRemote)
+		y, err := yaml.Marshal(*remoteRuleGroups)
+		if err != nil {
+			fmt.Println("yaml marshal error:", err)
 			return 1
 		}
-	*/
 
-	//ioutil.WriteFile(absfpath)
-
-	updates, nlocalrules := checkUpdate(localrules, remoteRules)
-
-	//update 处理方式应该不一样
-	//localrules = append(localrules, newupdate)
-
-	//nlocalrules = append(localrules, newrules)
-
-	//y, remoteRules, err := convertToYaml(nlocalrules, filename)
-
-	fmt.Println("newlocalrules:", nlocalrules)
-	yamlRG := &rulefmt.RuleGroups{
-		Groups: []rulefmt.RuleGroup{{
-			Name: filename,
-		}},
-	}
-	yamlRG.Groups[0].Rules = nlocalrules
-	y, err := yaml.Marshal(yamlRG)
-
-	if err != nil {
-		fmt.Println("yaml marshal error:", err)
-		return 1
-	}
-
-	isUpdate := false
-	if updates > 0 {
-		isUpdate = true
-	}
-
-	if isUpdate {
-		//TODO: 暂时比较粗暴，rule全刷，如果碰到已存在配置文件的情况可能会把已有内容刷丢。
-		//尽量配合newrules和newupdate列表进行变更。
 		updateRulesFile(y, absfpath)
 		reloadPromeConfig()
 	}
@@ -173,45 +134,41 @@ func getRedisData(path, password string) ([]string, error) {
 	return data, nil
 }
 
-func getRemoteRules(data []string) (map[string]string, error) {
-	remoteRulesMap := make(map[string]string, len(data))
+func getRemoteRules(data []string) (*rulefmt.RuleGroups, error) {
+
+	allRules := make(map[int][]rulefmt.Rule)
+
 	for _, d := range data {
 		var record judgeRecored
 		err := json.Unmarshal([]byte(d), &record)
 		if err != nil {
-			return nil, err
+			continue
 		}
-		remoteRulesMap[record.Name] = strings.TrimSpace(record.Expr)
+		rule := rulefmt.Rule{
+			Record: record.Name,
+			Expr:   record.Expr,
+		}
+		if err := rule.Validate(); err != nil {
+			fmt.Println("bad rule:", err)
+			continue
+		}
+		allRules[record.Step] = append(allRules[record.Step], rule)
 	}
+
+	var groups []rulefmt.RuleGroup
+
+	for step, rules := range allRules {
+		group := rulefmt.RuleGroup{
+			Name:     "wonder" + strconv.Itoa(step) + "Group",
+			Interval: model.Duration(time.Duration(step) * time.Second),
+		}
+		group.Rules = rules
+		groups = append(groups, group)
+	}
+
+	remoteRulesMap := &rulefmt.RuleGroups{Groups: groups}
 
 	return remoteRulesMap, nil
-}
-
-func convertToYaml(remoteRules map[string]string, filename string) ([]byte, []rulefmt.Rule, error) {
-	yamlRG := &rulefmt.RuleGroups{
-		Groups: []rulefmt.RuleGroup{{
-			Name: filename,
-		}},
-	}
-
-	yamlRules := make([]rulefmt.Rule, 0, len(remoteRules))
-
-	for name, expr := range remoteRules {
-		yamlRules = append(yamlRules, rulefmt.Rule{
-			Record: name,
-			Expr:   expr,
-			//Labels: map[string]string{"testlable1": "testvalue1", "testlabel2": "testvalue2"},
-		})
-	}
-
-	yamlRG.Groups[0].Rules = yamlRules
-	y, err := yaml.Marshal(yamlRG)
-
-	if err != nil {
-		fmt.Println(err)
-		return nil, nil, err
-	}
-	return y, yamlRules, err
 }
 
 func checkRulesValid(data []rulefmt.Rule) []error {
@@ -225,7 +182,7 @@ func checkRulesValid(data []rulefmt.Rule) []error {
 	return errors
 }
 
-func checkLocalRules(filename string) (int, []rulefmt.RuleGroup, []error) {
+func checkLocalRules(filename string) (int, *rulefmt.RuleGroups, []error) {
 	fmt.Println("Checking", filename)
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
 		f, _ := os.OpenFile(filename, os.O_RDONLY|os.O_CREATE, 0666)
@@ -233,7 +190,7 @@ func checkLocalRules(filename string) (int, []rulefmt.RuleGroup, []error) {
 	}
 	rgs, errs := rulefmt.ParseFile(filename)
 	if errs != nil {
-		return 0, nil, errs
+		return 0, rgs, errs
 	}
 
 	numRules := 0
@@ -241,63 +198,75 @@ func checkLocalRules(filename string) (int, []rulefmt.RuleGroup, []error) {
 		numRules += len(rg.Rules)
 	}
 
-	return numRules, rgs.Groups, nil
+	return numRules, rgs, nil
 }
 
-func checkUpdate(localrule, remoterule []rulefmt.Rule) (int, []rulefmt.Rule) {
-	var newrules []string
-	var newupdates []string
-	var deletedrules []string
-	var nrule bool
-	var newlocalrule []rulefmt.Rule
+func checkUpdate(localRuleGroups, remoteRuleGroups rulefmt.RuleGroups) int {
 
-	for _, rrule := range remoterule {
-		if err := rrule.Validate(); err != nil {
-			continue
+	startTime := time.Now()
+	var newRules []string
+	var newUpdates []string
+	var deletedRules []string
+
+	var nRule bool
+	remoteRules := make(map[string][]rulefmt.Rule)
+	localRules := make(map[string][]rulefmt.Rule)
+	deletedMap := make(map[string]bool)
+
+	for _, lRules := range localRuleGroups.Groups {
+		localRules[lRules.Name] = lRules.Rules
+		for _, rule := range lRules.Rules {
+			deletedMap[rule.Record] = true
 		}
-		newlocalrule = append(newlocalrule, rrule)
+	}
 
-		//check update && new
-		nrule = true
-		for _, lrule := range localrule {
-			if lrule.Record == rrule.Record {
-				nrule = false
-				if lrule.Expr != rrule.Expr || !reflect.DeepEqual(lrule.Labels, rrule.Labels) {
-					//newupdate 是不是可以去掉
-					newupdates = append(newupdates, rrule.Record)
-					//localrule[n] = rrule
+	for _, rRules := range remoteRuleGroups.Groups {
+		remoteRules[rRules.Name] = rRules.Rules
+	}
+
+	for name, rRules := range remoteRules {
+		for _, rRule := range rRules {
+			nRule = true
+			for _, lRule := range localRules[name] {
+
+				/*
+					if _, ok := deletedMap[lRule.Record]; !ok {
+						fmt.Println("recored:", lRule.Record)
+						deletedMap[lRule.Record] = true
+					}
+				*/
+
+				if lRule.Record == rRule.Record {
+					deletedMap[lRule.Record] = false
+
+					nRule = false
+					if !reflect.DeepEqual(lRule, rRule) {
+						newUpdates = append(newUpdates, rRule.Record)
+						break
+					}
 					break
 				}
-				break
 			}
-		}
-		if nrule {
-			newrules = append(newrules, rrule.Record)
-			//localrule = append(localrule, rrule)
+			if nRule {
+				newRules = append(newRules, rRule.Record)
+			}
 		}
 	}
 
-	//check deleted
-	for _, orule := range localrule {
-		deleted := true
-		for _, rule := range newlocalrule {
-			if orule.Record == rule.Record {
-				deleted = false
-			}
-		}
-		if deleted == true {
-			deletedrules = append(deletedrules, orule.Record)
+	for record, v := range deletedMap {
+		if v == true {
+			deletedRules = append(deletedRules, record)
 		}
 	}
 
-	fmt.Println("newrules: ", newrules)
-	fmt.Println("deletedrules: ", deletedrules)
-	fmt.Println("newupdates: ", newupdates)
+	fmt.Println("time use: ", time.Since(startTime))
+	fmt.Println("new rules: ", newRules)
+	fmt.Println("deleted rules: ", deletedRules)
+	fmt.Println("new updates: ", newUpdates)
 
-	updates := len(newrules) + len(newupdates) + len(deletedrules)
+	updates := len(newRules) + len(newUpdates) + len(deletedRules)
 
-	//return newrules, newupdates, newlocalrule
-	return updates, newlocalrule
+	return updates
 }
 
 func updateRulesFile(data []byte, filename string) {
@@ -306,66 +275,11 @@ func updateRulesFile(data []byte, filename string) {
 }
 
 func reloadPromeConfig() {
-	/*
-		client, err := NewClientForTimeOut()
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-		url := "http://127.0.0.1:9090/-/reload"
-		request, err := http.NewRequest("GET", url, strings.NewReader(""))
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
 
-		_, err = client.Do(request)
-
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-	*/
-	//_, err := exec.Command("sh", "pkill -SIGHUP prometheus").Output()
 	_, err := exec.Command("sh", "-c", "pkill -SIGHUP prometheus").Output()
 	if err != nil {
 		fmt.Println("prometheus reload Failed", err)
 	}
 
 	fmt.Println("prometheus reload Done")
-}
-
-func NewClientForTimeOut() (*http.Client, error) {
-
-	timeout := time.Duration(3 * time.Second)
-	var rt http.RoundTripper = NewDeadlineRoundTripper(timeout)
-
-	// Return a new client with the configured round tripper.
-	return NewClient(rt), nil
-}
-
-func NewDeadlineRoundTripper(timeout time.Duration) http.RoundTripper {
-	return &http.Transport{
-		DisableKeepAlives: true,
-		Dial: func(netw, addr string) (c net.Conn, err error) {
-			start := time.Now()
-
-			c, err = net.DialTimeout(netw, addr, timeout)
-			if err != nil {
-				return nil, err
-			}
-
-			//TODO 超时打点
-			if err = c.SetDeadline(start.Add(timeout)); err != nil {
-				c.Close()
-				return nil, err
-			}
-
-			return c, nil
-		},
-	}
-}
-
-func NewClient(rt http.RoundTripper) *http.Client {
-	return &http.Client{Transport: rt}
 }
