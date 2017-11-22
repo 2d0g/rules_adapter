@@ -178,14 +178,3 @@ func ParseFile(file string) (*RuleGroups, []error) {
 	}
 	return &groups, groups.Validate()
 }
-
-/*
-func ParseRemote(data map[string]string) (*RuleGroups, []error) {
-
-	var groups RuleGroups
-	if err := yaml.Unmarshal([]byte(data), &groups); err != nil {
-		return nil, []error{err}
-	}
-	return &groups, groups.Validate()
-}
-*/

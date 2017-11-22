@@ -35,8 +35,8 @@ import (
 )
 
 func main() {
-	app := kingpin.New(filepath.Base(os.Args[0]), "Tooling for the Prometheus monitoring system.")
-	app.Version(version.Print("promtool"))
+	app := kingpin.New(filepath.Base(os.Args[0]), "Tooling for the Prometheus rule generate.")
+	app.Version(version.Print("rule adapter"))
 	app.HelpFlag.Short('h')
 
 	updateCmd := app.Command("update", "Update the resources to newer formats.")
@@ -130,7 +130,6 @@ func getRedisData(path, password string) ([]string, error) {
 		fmt.Println(err)
 		return nil, err
 	}
-	fmt.Println("get redis data: ", data)
 	return data, nil
 }
 
@@ -169,17 +168,6 @@ func getRemoteRules(data []string) (*rulefmt.RuleGroups, error) {
 	remoteRulesMap := &rulefmt.RuleGroups{Groups: groups}
 
 	return remoteRulesMap, nil
-}
-
-func checkRulesValid(data []rulefmt.Rule) []error {
-	var errors []error
-	for _, d := range data {
-		errs := d.Validate()
-		if errs != nil {
-			errors = append(errors, errs...)
-		}
-	}
-	return errors
 }
 
 func checkLocalRules(filename string) (int, *rulefmt.RuleGroups, []error) {
@@ -228,13 +216,6 @@ func checkUpdate(localRuleGroups, remoteRuleGroups rulefmt.RuleGroups) int {
 		for _, rRule := range rRules {
 			nRule = true
 			for _, lRule := range localRules[name] {
-
-				/*
-					if _, ok := deletedMap[lRule.Record]; !ok {
-						fmt.Println("recored:", lRule.Record)
-						deletedMap[lRule.Record] = true
-					}
-				*/
 
 				if lRule.Record == rRule.Record {
 					deletedMap[lRule.Record] = false
