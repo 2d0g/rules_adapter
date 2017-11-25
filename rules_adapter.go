@@ -25,16 +25,28 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
+
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 	redis "gopkg.in/redis.v4"
 	yaml "gopkg.in/yaml.v2"
 
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/version"
+	"github.com/tinytub/rules_adapter/pkg/logkit"
 	"github.com/tinytub/rules_adapter/pkg/rulefmt"
 )
 
+// TODO: 打点
+var logger log.Logger
+
 func main() {
+
+	logLevel := logkit.AllowedLevel{}
+	logLevel.Set("info")
+	logger = logkit.New(logLevel)
+
 	app := kingpin.New(filepath.Base(os.Args[0]), "Tooling for the Prometheus rule generate.")
 	app.Version(version.Print("rule adapter"))
 	app.HelpFlag.Short('h')
@@ -46,7 +58,7 @@ func main() {
 
 	switch kingpin.MustParse(app.Parse(os.Args[1:])) {
 	case updateCmd.FullCommand():
-		os.Exit(RefreshRules(*ruleFilePath, (*redisPath).String(), *redisPassword))
+		RefreshRules(*ruleFilePath, (*redisPath).String(), *redisPassword)
 	}
 
 }
@@ -57,9 +69,9 @@ type judgeRecored struct {
 	Step int    `json:"step"`
 }
 
-func RefreshRules(path, redis, password string) int {
+func RefreshRules(path, redis, password string) {
 
-	interval := time.Duration(5 * time.Second)
+	interval := time.Duration(3 * time.Second)
 	updateRules(path, redis, password)
 
 	for {
@@ -71,22 +83,23 @@ func RefreshRules(path, redis, password string) int {
 
 }
 
-func updateRules(fpath, redis, password string) int {
+func updateRules(fpath, redis, password string) {
 	//TODO: filename with job or service name
 	filename := "wonder"
 	abpath := path.Join(fpath, filename+".yml")
 	absfpath, _ := filepath.Abs(abpath)
 
 	data, err := getRedisData(redis, password)
+
 	if err != nil {
-		fmt.Println("get data from redis error: ", err)
-		return 1
+		level.Error(logger).Log("msg", "get data from redis error", "err", err)
+		return
 	}
 
 	remoteRuleGroups, err := getRemoteRules(data)
 	if err != nil {
-		fmt.Println("get Remote rules error: ", err)
-		return 1
+		level.Error(logger).Log("msg", "get Remote rules error", "err", err)
+		return
 	}
 
 	//check rules
@@ -94,8 +107,8 @@ func updateRules(fpath, redis, password string) int {
 
 	//TODO: 文件不存在的时候该如何处理？
 	if errsLocal != nil {
-		fmt.Println("local rules err: ", errsLocal)
-		return 1
+		level.Error(logger).Log("msg", "local rules err", "err", errsLocal)
+		return
 	}
 
 	updates := checkUpdate(*localRuleGroups, *remoteRuleGroups)
@@ -104,15 +117,13 @@ func updateRules(fpath, redis, password string) int {
 
 		y, err := yaml.Marshal(*remoteRuleGroups)
 		if err != nil {
-			fmt.Println("yaml marshal error:", err)
-			return 1
+			level.Error(logger).Log("msg", "yaml marshal error", "err", err)
+			return
 		}
 
 		updateRulesFile(y, absfpath)
 		reloadPromeConfig()
 	}
-
-	return 0
 
 }
 
@@ -127,9 +138,9 @@ func getRedisData(path, password string) ([]string, error) {
 
 	data, err := client.LRange("CUSTOM_EXPRESS_STRATEGY", 0, -1).Result()
 	if err != nil {
-		fmt.Println(err)
 		return nil, err
 	}
+
 	return data, nil
 }
 
@@ -148,7 +159,7 @@ func getRemoteRules(data []string) (*rulefmt.RuleGroups, error) {
 			Expr:   record.Expr,
 		}
 		if err := rule.Validate(); err != nil {
-			fmt.Println("bad rule:", err)
+			level.Error(logger).Log("msg", "badRule", "err", fmt.Sprint(err))
 			continue
 		}
 		allRules[record.Step] = append(allRules[record.Step], rule)
@@ -171,7 +182,8 @@ func getRemoteRules(data []string) (*rulefmt.RuleGroups, error) {
 }
 
 func checkLocalRules(filename string) (int, *rulefmt.RuleGroups, []error) {
-	fmt.Println("Checking", filename)
+	//fmt.Println("Checking", filename)
+	level.Debug(logger).Log("checking", filename)
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
 		f, _ := os.OpenFile(filename, os.O_RDONLY|os.O_CREATE, 0666)
 		f.Close()
@@ -191,7 +203,7 @@ func checkLocalRules(filename string) (int, *rulefmt.RuleGroups, []error) {
 
 func checkUpdate(localRuleGroups, remoteRuleGroups rulefmt.RuleGroups) int {
 
-	startTime := time.Now()
+	//startTime := time.Now()
 	var newRules []string
 	var newUpdates []string
 	var deletedRules []string
@@ -223,6 +235,7 @@ func checkUpdate(localRuleGroups, remoteRuleGroups rulefmt.RuleGroups) int {
 					nRule = false
 					if !reflect.DeepEqual(lRule, rRule) {
 						newUpdates = append(newUpdates, rRule.Record)
+						level.Info(logger).Log("newUpdate", rRule.Record)
 						break
 					}
 					break
@@ -230,6 +243,7 @@ func checkUpdate(localRuleGroups, remoteRuleGroups rulefmt.RuleGroups) int {
 			}
 			if nRule {
 				newRules = append(newRules, rRule.Record)
+				level.Info(logger).Log("newRules", rRule.Record)
 			}
 		}
 	}
@@ -237,13 +251,9 @@ func checkUpdate(localRuleGroups, remoteRuleGroups rulefmt.RuleGroups) int {
 	for record, v := range deletedMap {
 		if v == true {
 			deletedRules = append(deletedRules, record)
+			level.Info(logger).Log("deletedRule", record)
 		}
 	}
-
-	fmt.Println("time use: ", time.Since(startTime))
-	fmt.Println("new rules: ", newRules)
-	fmt.Println("deleted rules: ", deletedRules)
-	fmt.Println("new updates: ", newUpdates)
 
 	updates := len(newRules) + len(newUpdates) + len(deletedRules)
 
@@ -251,16 +261,17 @@ func checkUpdate(localRuleGroups, remoteRuleGroups rulefmt.RuleGroups) int {
 }
 
 func updateRulesFile(data []byte, filename string) {
-	fmt.Println(filename)
-	ioutil.WriteFile(filename, data, 0666)
+	if err := ioutil.WriteFile(filename, data, 0666); err != nil {
+		level.Error(logger).Log("msg", "write file error", "err", err)
+	}
 }
 
 func reloadPromeConfig() {
 
 	_, err := exec.Command("sh", "-c", "pkill -SIGHUP prometheus").Output()
 	if err != nil {
-		fmt.Println("prometheus reload Failed", err)
+		level.Error(logger).Log("msg", "prometheus reload Failed")
+		return
 	}
-
-	fmt.Println("prometheus reload Done")
+	level.Info(logger).Log("msg", "prometheus reloaded")
 }
